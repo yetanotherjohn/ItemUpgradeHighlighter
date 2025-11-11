@@ -1,0 +1,3 @@
+## Title: ItemUpgradeHighlighter
+## Interface: 110007
+ItemUpgradeHighlighter.lua
