@@ -1,121 +1,144 @@
--- ItemUpgradeHighlighter.lua
-local ADDON = "ItemUpgradeHighlighter"
-local DEBUG = true
-local THRESHOLD = 10 -- ilvl difference needed to trigger highlight
+--========================================================--
+-- ItemUpgradeHighlighter - dynamic, quiet until /iuhdebug
+--========================================================--
 
-local function dbg(...)
-    if DEBUG then
-        print("|cffffff00["..ADDON.."]|r", ...)
+local addonName = ...
+local frame = CreateFrame("Frame")
+
+------------------------------------------------------------
+-- Slash Command (run once with verbose debug output)
+------------------------------------------------------------
+SLASH_IUHDEBUG1 = "/iuhdebug"
+SlashCmdList["IUHDEBUG"] = function()
+    print("|cffffa500[IUH]|r Running verbose debug pass...")
+    RefreshHighlights(true) -- true = debug mode
+end
+
+------------------------------------------------------------
+-- Utility
+------------------------------------------------------------
+local function dbg(verbose, ...)
+    if verbose then
+        print("|cffffa500[IUH]|r", ...)
     end
 end
 
--- slotID -> CharacterFrame slot frame name
-local SLOT_FRAMES = {
-    [1]  = "CharacterHeadSlot",
-    [2]  = "CharacterNeckSlot",
-    [3]  = "CharacterShoulderSlot",
-    [5]  = "CharacterChestSlot",
-    [6]  = "CharacterWaistSlot",
-    [7]  = "CharacterLegsSlot",
-    [8]  = "CharacterFeetSlot",
-    [9]  = "CharacterWristSlot",
-    [10] = "CharacterHandsSlot",
-    [11] = "CharacterFinger0Slot",
-    [12] = "CharacterFinger1Slot",
-    [13] = "CharacterTrinket0Slot",
-    [14] = "CharacterTrinket1Slot",
-    [15] = "CharacterBackSlot",
-    [16] = "CharacterMainHandSlot",
-    [17] = "CharacterSecondaryHandSlot",
+------------------------------------------------------------
+-- Slot Mapping (auto-built from API, skips invalids)
+------------------------------------------------------------
+local slotNames = {
+    "HeadSlot","NeckSlot","ShoulderSlot","ShirtSlot","ChestSlot",
+    "WaistSlot","LegsSlot","FeetSlot","WristSlot","HandsSlot",
+    "Finger0Slot","Finger1Slot","Trinket0Slot","Trinket1Slot",
+    "BackSlot","MainHandSlot","SecondaryHandSlot","RangedSlot","TabardSlot",
 }
 
--- create / show pulsing amber border around character slot
-local PULSE_SPEED = 2 -- seconds for full pulse cycle
+local slotMap = {}
 
-local function EnsureBorder(frame)
-    if not frame then return end
-    if not frame.UpgradeBorder then
-        local b = CreateFrame("Frame", nil, frame, "BackdropTemplate")
-        b:SetAllPoints(frame)
-        b:SetBackdrop({
-            edgeFile = "Interface\\Buttons\\WHITE8X8", -- plain white square
-            edgeSize = 2,
-            insets = { left = 0, right = 0, top = 0, bottom = 0 }
-        })
-        b:SetBackdropColor(0,0,0,0)              -- fully transparent background
-        b:SetBackdropBorderColor(1,0.7,0,1)      -- amber color
-        b:Hide()
-
-        b:EnableMouse(false)                      -- crucial: allow mouse events to pass through
-
-        -- start pulse animation
-        b._pulseTime = 0
-        b:SetScript("OnUpdate", function(self, elapsed)
-            if self:IsShown() then
-                self._pulseTime = self._pulseTime + elapsed
-                local alpha = 0.3 + 0.2 * math.sin(self._pulseTime / PULSE_SPEED * 2 * math.pi)
-                self:SetAlpha(alpha)
-            end
-        end)
-
-        frame.UpgradeBorder = b
+local function BuildSlotMap(verbose)
+    wipe(slotMap)
+    for _, name in ipairs(slotNames) do
+        local ok, slotID = pcall(GetInventorySlotInfo, name)
+        if ok and slotID then
+            slotMap[slotID] = name
+        else
+            dbg(verbose, "Skipping invalid slot:", name)
+        end
     end
+    dbg(verbose, "Built slot map with", #slotMap, "valid slots.")
 end
 
-local function SetHighlight(frame, enable)
-    if not frame then return end
-    EnsureBorder(frame)
-    if enable then
-        frame.UpgradeBorder:Show()
-    else
-        frame.UpgradeBorder:Hide()
-    end
+------------------------------------------------------------
+-- Highlight Frames
+------------------------------------------------------------
+local highlights = {}
+
+local function CreateHighlightFrame(parent)
+    local hl = CreateFrame("Frame", nil, parent)
+    hl:SetAllPoints()
+    hl:SetFrameLevel(parent:GetFrameLevel() + 10)
+    hl.texture = hl:CreateTexture(nil, "OVERLAY")
+    hl.texture:SetAllPoints()
+    hl.texture:SetColorTexture(1, 0.7, 0, 0.4)
+    hl.texture:SetBlendMode("ADD")
+    hl:Hide()
+
+    local ag = hl:CreateAnimationGroup()
+    local fadeOut = ag:CreateAnimation("Alpha")
+    fadeOut:SetFromAlpha(1)
+    fadeOut:SetToAlpha(0.2)
+    fadeOut:SetDuration(0.6)
+    fadeOut:SetOrder(1)
+    local fadeIn = ag:CreateAnimation("Alpha")
+    fadeIn:SetFromAlpha(0.2)
+    fadeIn:SetToAlpha(1)
+    fadeIn:SetDuration(0.6)
+    fadeIn:SetOrder(2)
+    ag:SetLooping("REPEAT")
+    ag:Play()
+
+    return hl
 end
 
-
-
--- get effective ilvl safely
-local function GetEffectiveILvl(link)
-    if not link then return 0 end
-    local lvl = 0
+------------------------------------------------------------
+-- Helpers
+------------------------------------------------------------
+local function GetEffectiveILvl(itemLink)
+    if not itemLink then return 0 end
+    local ilvl = 0
     if C_Item and C_Item.GetDetailedItemLevelInfo then
-        lvl = C_Item.GetDetailedItemLevelInfo(link) or 0
+        ilvl = C_Item.GetDetailedItemLevelInfo(itemLink) or 0
     else
-        lvl = select(4, GetDetailedItemLevelInfo(link)) or 0
+        ilvl = select(4, GetDetailedItemLevelInfo(itemLink)) or 0
     end
-    return lvl
+    return ilvl
 end
 
--- return numeric equipLoc for a bag item
-local function GetItemEquipType(link)
-    if not link then return nil end
-    local itemID = GetItemInfoInstant(link)
-    if not itemID then return nil end
-    if C_Item and C_Item.GetItemInventoryTypeByID then
-        return C_Item.GetItemInventoryTypeByID(itemID) -- numeric equipLoc
-    else
-        local _, _, _, _, _, _, _, _, equipLocStr = GetItemInfo(itemID)
-        -- fallback: convert known strings to numeric if needed, optional
-        return equipLocStr
-    end
-end
+local equipLocToSlotIDs = {
+    INVTYPE_HEAD = {1},
+    INVTYPE_NECK = {2},
+    INVTYPE_SHOULDER = {3},
+    INVTYPE_BODY = {4},
+    INVTYPE_CHEST = {5},
+    INVTYPE_ROBE = {5},
+    INVTYPE_WAIST = {6},
+    INVTYPE_LEGS = {7},
+    INVTYPE_FEET = {8},
+    INVTYPE_WRIST = {9},
+    INVTYPE_HAND = {10},
+    INVTYPE_FINGER = {11, 12},
+    INVTYPE_TRINKET = {13, 14},
+    INVTYPE_CLOAK = {15},
+    INVTYPE_WEAPON = {16, 17},
+    INVTYPE_2HWEAPON = {16},
+    INVTYPE_WEAPONMAINHAND = {16},
+    INVTYPE_WEAPONOFFHAND = {17},
+    INVTYPE_HOLDABLE = {17},
+    INVTYPE_RANGED = {18},
+    INVTYPE_RANGEDRIGHT = {18},
+    INVTYPE_TABARD = {19},
+}
 
--- find best bag item for given slotID
+------------------------------------------------------------
+-- Core Scanning
+------------------------------------------------------------
 local function FindBestBagItemLevel(slotID)
     local bestILvl, bestLink = 0, nil
     for bag = 0, NUM_BAG_SLOTS do
-        local count = C_Container.GetContainerNumSlots(bag)
-        for slot = 1, count do
+        for slot = 1, C_Container.GetContainerNumSlots(bag) do
             local link = C_Container.GetContainerItemLink(bag, slot)
             if link then
-                local equipLoc = GetItemEquipType(link)
-                if equipLoc == slotID 
-                   or (equipLoc == 11 and (slotID == 11 or slotID == 12))
-                   or (equipLoc == 13 and (slotID == 13 or slotID == 14)) then
-                    local ilvl = GetEffectiveILvl(link)
-                    if ilvl > bestILvl then
-                        bestILvl = ilvl
-                        bestLink = link
+                local _, _, _, _, _, _, _, _, equipLoc = GetItemInfo(link)
+                local validSlots = equipLocToSlotIDs[equipLoc]
+                if validSlots then
+                    for _, validSlot in ipairs(validSlots) do
+                        if validSlot == slotID then
+                            local ilvl = GetEffectiveILvl(link)
+                            if ilvl > bestILvl then
+                                bestILvl = ilvl
+                                bestLink = link
+                            end
+                        end
                     end
                 end
             end
@@ -124,26 +147,61 @@ local function FindBestBagItemLevel(slotID)
     return bestILvl, bestLink
 end
 
--- update highlights for all character slots
-local function UpdateHighlights()
-    for slotID, frameName in pairs(SLOT_FRAMES) do
-        local frame = _G[frameName]
-        local eqLink = GetInventoryItemLink("player", slotID)
-        local eqILvl = GetEffectiveILvl(eqLink)
-        local bagILvl, bagLink = FindBestBagItemLevel(slotID)
-        if bagILvl > 0 and (bagILvl - eqILvl) >= THRESHOLD then
-            SetHighlight(frame, true)
-        else
-            SetHighlight(frame, false)
+------------------------------------------------------------
+-- Highlight Update (quiet unless verbose==true)
+------------------------------------------------------------
+local THRESHOLD = 10
+
+function RefreshHighlights(verbose)
+    if not next(slotMap) then BuildSlotMap(verbose) end
+
+    for slotID, slotName in pairs(slotMap) do
+        local slotFrame = _G["Character" .. slotName]
+        if slotFrame then
+            local eqLink = GetInventoryItemLink("player", slotID)
+            local eqILvl = GetEffectiveILvl(eqLink)
+            local bestBagILvl, bestLink = FindBestBagItemLevel(slotID)
+
+            local highlight = bestBagILvl > eqILvl and bestBagILvl - eqILvl >= THRESHOLD
+            if not highlights[slotID] then
+                highlights[slotID] = CreateHighlightFrame(slotFrame)
+            end
+            highlights[slotID]:SetShown(highlight)
+
+            if verbose then
+                if highlight then
+                    print(string.format("|cffffa500[IUH]|r %s: upgrade %d→%d (%s)",
+                        slotName, eqILvl, bestBagILvl, bestLink or "unknown"))
+                else
+                    print(string.format("|cff999999[IUH]|r %s: no upgrade (eq %d, bag %d)",
+                        slotName, eqILvl, bestBagILvl))
+                end
+            end
         end
     end
 end
 
--- event frame
-local f = CreateFrame("Frame")
-f:RegisterEvent("PLAYER_ENTERING_WORLD")
-f:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
-f:RegisterEvent("BAG_UPDATE_DELAYED")
-f:SetScript("OnEvent", function(_, event)
-    C_Timer.After(0.2, UpdateHighlights)
+------------------------------------------------------------
+-- Event Handling (debounced)
+------------------------------------------------------------
+local pending = false
+local function ScheduleUpdate()
+    if pending then return end
+    pending = true
+    C_Timer.After(0.3, function()
+        pending = false
+        RefreshHighlights(false)
+    end)
+end
+
+frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+frame:RegisterEvent("BAG_UPDATE_DELAYED")
+frame:RegisterEvent("UNIT_INVENTORY_CHANGED")
+
+frame:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_ENTERING_WORLD" then
+        BuildSlotMap(false)
+    end
+    ScheduleUpdate()
 end)
