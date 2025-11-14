@@ -59,7 +59,7 @@ local function CreateHighlightFrame(parent)
     hl:SetFrameLevel(parent:GetFrameLevel() + 10)
     hl.texture = hl:CreateTexture(nil, "OVERLAY")
     hl.texture:SetAllPoints()
-    hl.texture:SetColorTexture(1, 0.7, 0, 0.4)
+    hl.texture:SetColorTexture(1, 0.7, 0, 0.55) -- slightly brighter amber
     hl.texture:SetBlendMode("ADD")
     hl:Hide()
 
@@ -92,6 +92,15 @@ local function GetEffectiveILvl(itemLink)
         ilvl = select(4, GetDetailedItemLevelInfo(itemLink)) or 0
     end
     return ilvl
+end
+
+-- Detect whether a two-handed weapon is currently equipped
+local function IsTwoHandedEquipped()
+    local mainLink = GetInventoryItemLink("player", INVSLOT_MAINHAND)
+    if not mainLink then return false end
+
+    local _, _, _, _, _, _, _, _, equipLoc = GetItemInfo(mainLink)
+    return equipLoc == "INVTYPE_2HWEAPON" or equipLoc == "INVTYPE_RANGED" or equipLoc == "INVTYPE_RANGEDRIGHT"
 end
 
 local equipLocToSlotIDs = {
@@ -155,26 +164,33 @@ local THRESHOLD = 10
 function RefreshHighlights(verbose)
     if not next(slotMap) then BuildSlotMap(verbose) end
 
+    local twoHandEquipped = IsTwoHandedEquipped()
+
     for slotID, slotName in pairs(slotMap) do
-        local slotFrame = _G["Character" .. slotName]
-        if slotFrame then
-            local eqLink = GetInventoryItemLink("player", slotID)
-            local eqILvl = GetEffectiveILvl(eqLink)
-            local bestBagILvl, bestLink = FindBestBagItemLevel(slotID)
+        -- Skip offhand slot entirely if a 2H is equipped
+        if twoHandEquipped and slotID == INVSLOT_OFFHAND then
+            dbg(verbose, "Skipping SecondaryHandSlot (two-handed weapon equipped)")
+        else
+            local slotFrame = _G["Character" .. slotName]
+            if slotFrame then
+                local eqLink = GetInventoryItemLink("player", slotID)
+                local eqILvl = GetEffectiveILvl(eqLink)
+                local bestBagILvl, bestLink = FindBestBagItemLevel(slotID)
 
-            local highlight = bestBagILvl > eqILvl and bestBagILvl - eqILvl >= THRESHOLD
-            if not highlights[slotID] then
-                highlights[slotID] = CreateHighlightFrame(slotFrame)
-            end
-            highlights[slotID]:SetShown(highlight)
+                local highlight = bestBagILvl > eqILvl and bestBagILvl - eqILvl >= THRESHOLD
+                if not highlights[slotID] then
+                    highlights[slotID] = CreateHighlightFrame(slotFrame)
+                end
+                highlights[slotID]:SetShown(highlight)
 
-            if verbose then
-                if highlight then
-                    print(string.format("|cffffa500[IUH]|r %s: upgrade %d→%d (%s)",
-                        slotName, eqILvl, bestBagILvl, bestLink or "unknown"))
-                else
-                    print(string.format("|cff999999[IUH]|r %s: no upgrade (eq %d, bag %d)",
-                        slotName, eqILvl, bestBagILvl))
+                if verbose then
+                    if highlight then
+                        print(string.format("|cffffa500[IUH]|r %s: upgrade %d→%d (%s)",
+                            slotName, eqILvl, bestBagILvl, bestLink or "unknown"))
+                    else
+                        print(string.format("|cff999999[IUH]|r %s: no upgrade (eq %d, bag %d)",
+                            slotName, eqILvl, bestBagILvl))
+                    end
                 end
             end
         end
@@ -182,7 +198,7 @@ function RefreshHighlights(verbose)
 end
 
 ------------------------------------------------------------
--- Event Handling (debounced)
+-- Event Handling (dewwqdounced)
 ------------------------------------------------------------
 local pending = false
 local function ScheduleUpdate()
