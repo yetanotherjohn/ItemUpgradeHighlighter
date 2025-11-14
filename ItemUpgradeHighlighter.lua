@@ -37,15 +37,17 @@ local slotMap = {}
 
 local function BuildSlotMap(verbose)
     wipe(slotMap)
+    local count = 0
     for _, name in ipairs(slotNames) do
         local ok, slotID = pcall(GetInventorySlotInfo, name)
         if ok and slotID then
             slotMap[slotID] = name
+            count = count + 1
         else
             dbg(verbose, "Skipping invalid slot:", name)
         end
     end
-    dbg(verbose, "Built slot map with", #slotMap, "valid slots.")
+    dbg(verbose, "Built slot map with", count, "valid slots.")
 end
 
 ------------------------------------------------------------
@@ -129,9 +131,77 @@ local equipLocToSlotIDs = {
 }
 
 ------------------------------------------------------------
--- Core Scanning
+-- UNIQUE / DUPLICATE HANDLING
+-- Build unique-equipped map per evaluated slot (exclude that slot's equipped item)
 ------------------------------------------------------------
-local function FindBestBagItemLevel(slotID)
+
+local function GetUniqueCategoriesEquipped(excludeSlot)
+    local uniqueMap = {}
+
+    -- check both finger and trinket slots
+    local checkSlots = { INVSLOT_FINGER1, INVSLOT_FINGER2, INVSLOT_TRINKET1, INVSLOT_TRINKET2 }
+
+    for _, slotID in ipairs(checkSlots) do
+        if slotID ~= excludeSlot then
+            local link = GetInventoryItemLink("player", slotID)
+            if link then
+                -- record exact itemID to prevent duplicates of same item being equipped elsewhere
+                local itemID = tonumber(string.match(link, "item:(%d+)"))
+                if itemID then
+                    uniqueMap["ITEMID:"..itemID] = true
+                end
+
+                -- collect UNIQUE-related GetItemStats keys if available
+                if GetItemStats then
+                    local stats = GetItemStats(link)
+                    if stats then
+                        for k, v in pairs(stats) do
+                            if type(k) == "string" and (k:find("UNIQUE") or k:find("UNIQUEEQUIPPED") or k:find("ITEM_UNIQUE")) then
+                                uniqueMap["STAT:"..k] = true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return uniqueMap
+end
+
+local function ItemConflictsWithUniqueMap(itemLink, uniqueMap)
+    if not itemLink or not uniqueMap then return false end
+
+    -- Exact itemID match: conflicts with already-equipped identical item in other slot
+    local itemID = tonumber(string.match(itemLink, "item:(%d+)"))
+    if itemID and uniqueMap["ITEMID:"..itemID] then
+        return true
+    end
+
+    -- Stats-based uniqueness conflict
+    if GetItemStats then
+        local stats = GetItemStats(itemLink)
+        if stats then
+            for k, v in pairs(stats) do
+                if type(k) == "string" and (k:find("UNIQUE") or k:find("UNIQUEEQUIPPED") or k:find("ITEM_UNIQUE")) then
+                    if uniqueMap["STAT:"..k] then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback heuristic omitted (tooltip scanning) to remain lightweight
+
+    return false
+end
+
+------------------------------------------------------------
+-- Core Scanning
+-- FindBestBagItemLevel now takes uniqueMap to skip bag items that would conflict
+------------------------------------------------------------
+local function FindBestBagItemLevel(slotID, uniqueMap)
     local bestILvl, bestLink = 0, nil
     for bag = 0, NUM_BAG_SLOTS do
         for slot = 1, C_Container.GetContainerNumSlots(bag) do
@@ -142,10 +212,14 @@ local function FindBestBagItemLevel(slotID)
                 if validSlots then
                     for _, validSlot in ipairs(validSlots) do
                         if validSlot == slotID then
-                            local ilvl = GetEffectiveILvl(link)
-                            if ilvl > bestILvl then
-                                bestILvl = ilvl
-                                bestLink = link
+                            if uniqueMap and ItemConflictsWithUniqueMap(link, uniqueMap) then
+                                -- skip conflicting bag item
+                            else
+                                local ilvl = GetEffectiveILvl(link)
+                                if ilvl > bestILvl then
+                                    bestILvl = ilvl
+                                    bestLink = link
+                                end
                             end
                         end
                     end
@@ -175,7 +249,11 @@ function RefreshHighlights(verbose)
             if slotFrame then
                 local eqLink = GetInventoryItemLink("player", slotID)
                 local eqILvl = GetEffectiveILvl(eqLink)
-                local bestBagILvl, bestLink = FindBestBagItemLevel(slotID)
+
+                -- build unique map excluding the item in the currently-evaluated slot
+                local uniqueEquippedMap = GetUniqueCategoriesEquipped(slotID)
+
+                local bestBagILvl, bestLink = FindBestBagItemLevel(slotID, uniqueEquippedMap)
 
                 local highlight = bestBagILvl > eqILvl and bestBagILvl - eqILvl >= THRESHOLD
                 if not highlights[slotID] then
